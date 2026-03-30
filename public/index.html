@@ -374,7 +374,7 @@ function QuitaApp() {
     });
   };
 
-  const filterByMonth = (e) => { const d = new Date(e.date); return (d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0")) === monthFilter; };
+  const filterByMonth = (e) => { if (monthFilter === "all") return true; const d = new Date(e.date); return (d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0")) === monthFilter; };
   const filteredExpenses = state.expenses.filter(filterByMonth);
   const totalExpenses = filteredExpenses.reduce((s, e) => s + e.amount, 0);
   const levelInfo = LEVELS[state.level];
@@ -484,16 +484,74 @@ function QuitaApp() {
   };
 
   const Expenses = () => {
+    const [view, setView] = useState("dashboard");
     const months = [...new Set(state.expenses.map(e => { const d=new Date(e.date); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0"); }))].sort().reverse();
     if (months.length > 0 && !months.includes(monthFilter)) setMonthFilter(months[0]);
     const monthLabel = (m) => { const [y,mo]=m.split("-"); const names=["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"]; return names[parseInt(mo)-1]+" "+y; };
+    const COLORS = ["#7B2FF2","#22C55E","#EF4444","#F59E0B","#3B82F6","#EC4899","#14B8A6","#F97316","#8B5CF6","#06B6D4","#84CC16","#E11D48","#6366F1","#999"];
+    const catData = CATEGORIES.map((cat,i) => {
+      const total = filteredExpenses.filter(e=>e.category===cat).reduce((s,e)=>s+e.amount,0);
+      return { cat, total, color: COLORS[i % COLORS.length], count: filteredExpenses.filter(e=>e.category===cat).length };
+    }).filter(c=>c.total>0).sort((a,b)=>b.total-a.total);
+    const grandTotal = catData.reduce((s,c)=>s+c.total,0);
+
+    // Monthly trend data
+    const allMonths = [...new Set(state.expenses.map(e => { const d=new Date(e.date); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0"); }))].sort();
+    const monthlyTotals = allMonths.map(m => {
+      const t = state.expenses.filter(e => { const d=new Date(e.date); return (d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0"))===m; }).reduce((s,e)=>s+e.amount,0);
+      return { month: m, total: t, label: monthLabel(m) };
+    });
+    const maxMonthly = Math.max(...monthlyTotals.map(m=>m.total), 1);
+
+    // Donut chart SVG
+    const DonutChart = () => {
+      if (catData.length === 0) return null;
+      const size = 200, cx = 100, cy = 100, r = 75, r2 = 50;
+      let acc = 0;
+      const slices = catData.map(c => {
+        const pct = c.total / grandTotal;
+        const start = acc; acc += pct;
+        const a1 = start * Math.PI * 2 - Math.PI/2;
+        const a2 = acc * Math.PI * 2 - Math.PI/2;
+        const large = pct > 0.5 ? 1 : 0;
+        const x1o = cx + r * Math.cos(a1), y1o = cy + r * Math.sin(a1);
+        const x2o = cx + r * Math.cos(a2), y2o = cy + r * Math.sin(a2);
+        const x1i = cx + r2 * Math.cos(a2), y1i = cy + r2 * Math.sin(a2);
+        const x2i = cx + r2 * Math.cos(a1), y2i = cy + r2 * Math.sin(a1);
+        const d = `M${x1o},${y1o} A${r},${r} 0 ${large} 1 ${x2o},${y2o} L${x1i},${y1i} A${r2},${r2} 0 ${large} 0 ${x2i},${y2i} Z`;
+        return { ...c, d, pct };
+      });
+      return (
+        <svg viewBox="0 0 200 200" style={{width:"100%",maxWidth:220,margin:"0 auto",display:"block"}}>
+          {slices.map((s,i) => (
+            <path key={i} d={s.d} fill={s.color} stroke="#fff" strokeWidth="2"
+              style={{cursor:"pointer",opacity:catFilter==="Todos"||catFilter===s.cat?1:0.3,transition:"opacity 0.2s"}}
+              onClick={()=>setCatFilter(catFilter===s.cat?"Todos":s.cat)}/>
+          ))}
+          <text x={cx} y={cy-8} textAnchor="middle" style={{fontSize:18,fontWeight:500,fill:"#333"}}>{catFilter!=="Todos"?catFilter:"Total"}</text>
+          <text x={cx} y={cy+14} textAnchor="middle" style={{fontSize:13,fill:"#999"}}>
+            R$ {(catFilter!=="Todos"?catData.find(c=>c.cat===catFilter)?.total||0:grandTotal).toLocaleString("pt-BR",{minimumFractionDigits:0})}
+          </text>
+        </svg>
+      );
+    };
+
     return (
     <div style={{background:"#F8F8F8",minHeight:"100vh"}}>
       <div style={{...ph,paddingBottom:24}}>
-        <div style={{fontSize:14,opacity:0.8}}>Gastos do mês</div>
-        <div style={{fontSize:28,fontWeight:500}}>R$ {totalExpenses.toLocaleString("pt-BR",{minimumFractionDigits:2})}</div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div>
+            <div style={{fontSize:14,opacity:0.8}}>Gastos {monthLabel(monthFilter)}</div>
+            <div style={{fontSize:28,fontWeight:500}}>R$ {totalExpenses.toLocaleString("pt-BR",{minimumFractionDigits:2})}</div>
+          </div>
+          <div style={{display:"flex",gap:4}}>
+            <button onClick={()=>setView("dashboard")} style={{padding:"6px 12px",borderRadius:10,fontSize:12,border:"none",background:view==="dashboard"?"rgba(255,255,255,0.3)":"rgba(255,255,255,0.1)",color:"#fff",cursor:"pointer"}}>Dashboard</button>
+            <button onClick={()=>setView("list")} style={{padding:"6px 12px",borderRadius:10,fontSize:12,border:"none",background:view==="list"?"rgba(255,255,255,0.3)":"rgba(255,255,255,0.1)",color:"#fff",cursor:"pointer"}}>Lista</button>
+          </div>
+        </div>
         {state.income>0&&<div style={{fontSize:12,opacity:0.7,marginTop:4}}>{Math.round((totalExpenses/state.income)*100)}% da renda</div>}
-        {months.length>1&&<div style={{display:"flex",gap:6,marginTop:10,flexWrap:"wrap"}}>
+        {months.length>0&&<div style={{display:"flex",gap:6,marginTop:10,flexWrap:"wrap"}}>
+          <button onClick={()=>setMonthFilter("all")} style={{padding:"4px 12px",borderRadius:14,fontSize:12,border:"none",background:monthFilter==="all"?"rgba(255,255,255,0.3)":"rgba(255,255,255,0.1)",color:"#fff",cursor:"pointer",fontWeight:monthFilter==="all"?500:400}}>Todos</button>
           {months.map(m=><button key={m} onClick={()=>setMonthFilter(m)} style={{padding:"4px 12px",borderRadius:14,fontSize:12,border:"none",background:monthFilter===m?"rgba(255,255,255,0.3)":"rgba(255,255,255,0.1)",color:"#fff",cursor:"pointer",fontWeight:monthFilter===m?500:400}}>{monthLabel(m)}</button>)}
         </div>}
       </div>
@@ -503,8 +561,8 @@ function QuitaApp() {
           <label style={{...btnOut,flex:1,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",padding:"12px 8px",fontSize:14}}>Excel<input type="file" accept=".xlsx,.xls,.csv" onChange={handleExcelUpload} style={{display:"none"}}/></label>
           <label style={{...btnOut,flex:1,display:"flex",alignItems:"center",justifyContent:"center",cursor:pdfParsing?"wait":"pointer",padding:"12px 8px",fontSize:14,opacity:pdfParsing?0.6:1}}>{pdfParsing?"Lendo...":"PDF"}<input type="file" accept=".pdf" onChange={handlePdfUpload} disabled={pdfParsing} style={{display:"none"}}/></label>
         </div>
-        {!importStep&&!showExpenseForm&&<div style={{fontSize:12,color:"#999",textAlign:"center",marginBottom:14}}>Importe fatura ou extrato em PDF — a IA categoriza automaticamente</div>}
-        {importStep==="pdf-loading"&&<div style={{...card,padding:24,textAlign:"center"}}><div style={{fontSize:32,marginBottom:12}}>🐷</div><div style={{fontSize:15,fontWeight:500,color:"#333",marginBottom:4}}>Analisando seu PDF...</div><div style={{fontSize:13,color:"#999"}}>O porquinho tá lendo sua fatura</div></div>}
+
+        {importStep==="pdf-loading"&&<div style={{...card,padding:24,textAlign:"center"}}><div style={{fontSize:32,marginBottom:12}}>🐷</div><div style={{fontSize:15,fontWeight:500,color:"#333",marginBottom:4}}>Analisando...</div><div style={{fontSize:13,color:"#999"}}>O porquinho tá lendo seus dados</div></div>}
         {importStep==="pdf-preview"&&pdfPreview&&<div style={{...card,padding:20}}>
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}><span style={{fontSize:20}}>🐷</span><span style={{fontSize:16,fontWeight:500,color:"#333"}}>Gastos encontrados!</span></div>
           <div style={{fontSize:13,color:"#999",marginBottom:16}}>Encontrei {pdfPreview.length} gastos. Desmarque os que não quiser:</div>
@@ -527,7 +585,61 @@ function QuitaApp() {
           <div style={{display:"flex",gap:8}}><button style={{...btn,flex:1}} onClick={addExpense}>Salvar (+5 XP)</button><button style={{...btnOut,flex:1}} onClick={()=>setShowExpenseForm(false)}>Cancelar</button></div>
         </div>}
 
-        {state.expenses.length>0&&!importStep&&<>
+        {view==="dashboard"&&state.expenses.length>0&&!importStep&&!showExpenseForm&&<>
+          <div style={card}>
+            <div style={{fontSize:14,fontWeight:500,color:"#333",marginBottom:12}}>Gastos por categoria</div>
+            <DonutChart/>
+            {catFilter!=="Todos"&&<div style={{textAlign:"center",marginTop:8}}><button onClick={()=>setCatFilter("Todos")} style={{fontSize:12,color:"#7B2FF2",background:"#EEEDFE",border:"none",borderRadius:10,padding:"4px 14px",cursor:"pointer"}}>Limpar filtro</button></div>}
+            <div style={{marginTop:16}}>
+              {catData.map(c=>{
+                const pct=grandTotal>0?Math.round((c.total/grandTotal)*100):0;
+                const isActive=catFilter==="Todos"||catFilter===c.cat;
+                return <div key={c.cat} onClick={()=>setCatFilter(catFilter===c.cat?"Todos":c.cat)} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:"1px solid #F5F5F5",cursor:"pointer",opacity:isActive?1:0.4,transition:"opacity 0.2s"}}>
+                  <div style={{width:12,height:12,borderRadius:3,background:c.color,flexShrink:0}}/>
+                  <span style={{flex:1,fontSize:13,color:"#333"}}>{c.cat}</span>
+                  <span style={{fontSize:12,color:"#999"}}>{pct}%</span>
+                  <span style={{fontSize:13,fontWeight:500,color:"#333",minWidth:80,textAlign:"right"}}>R$ {c.total.toLocaleString("pt-BR",{minimumFractionDigits:0})}</span>
+                </div>;
+              })}
+            </div>
+          </div>
+
+          {monthlyTotals.length>1&&<div style={card}>
+            <div style={{fontSize:14,fontWeight:500,color:"#333",marginBottom:12}}>Evolução mensal</div>
+            <div style={{display:"flex",alignItems:"flex-end",gap:8,height:120}}>
+              {monthlyTotals.map(m=>{
+                const h=Math.max(8, (m.total/maxMonthly)*100);
+                const isActive=monthFilter==="all"||monthFilter===m.month;
+                return <div key={m.month} onClick={()=>setMonthFilter(monthFilter===m.month?"all":m.month)} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4,cursor:"pointer",opacity:isActive?1:0.4}}>
+                  <span style={{fontSize:10,color:"#999",fontWeight:500}}>R$ {(m.total/1000).toFixed(1)}k</span>
+                  <div style={{width:"100%",maxWidth:40,height:h,background:monthFilter===m.month?"#7B2FF2":"#EEEDFE",borderRadius:6,transition:"all 0.3s"}}/>
+                  <span style={{fontSize:10,color:monthFilter===m.month?"#7B2FF2":"#999",fontWeight:monthFilter===m.month?500:400}}>{m.label.split(" ")[0]}</span>
+                </div>;
+              })}
+            </div>
+          </div>}
+
+          {catFilter!=="Todos"&&<div style={card}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
+              <span style={{fontSize:14,fontWeight:500,color:"#333"}}>{catFilter}</span>
+              <span style={{fontSize:14,fontWeight:500,color:"#7B2FF2"}}>R$ {(catData.find(c=>c.cat===catFilter)?.total||0).toLocaleString("pt-BR",{minimumFractionDigits:2})}</span>
+            </div>
+            {filteredExpenses.filter(e=>e.category===catFilter).sort((a,b)=>b.amount-a.amount).slice(0,10).map(e=><div key={e.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:"1px solid #F5F5F5"}}>
+              <div><div style={{fontSize:13,color:"#333"}}>{e.name}</div><div style={{fontSize:11,color:"#BBB"}}>{new Date(e.date).toLocaleDateString("pt-BR")}</div></div>
+              <span style={{fontSize:13,fontWeight:500,color:"#7B2FF2"}}>R$ {e.amount.toLocaleString("pt-BR",{minimumFractionDigits:2})}</span>
+            </div>)}
+            <button onClick={()=>setView("list")} style={{fontSize:12,color:"#7B2FF2",background:"none",border:"none",cursor:"pointer",marginTop:8,padding:0}}>Ver todos na lista</button>
+          </div>}
+
+          {catData.length>0&&<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+            <div style={{...card,textAlign:"center",marginBottom:0}}><div style={{fontSize:12,color:"#999"}}>Total gastos</div><div style={{fontSize:18,fontWeight:500,color:"#7B2FF2"}}>{filteredExpenses.length}</div></div>
+            <div style={{...card,textAlign:"center",marginBottom:0}}><div style={{fontSize:12,color:"#999"}}>Categorias</div><div style={{fontSize:18,fontWeight:500,color:"#7B2FF2"}}>{catData.length}</div></div>
+            <div style={{...card,textAlign:"center",marginBottom:0}}><div style={{fontSize:12,color:"#999"}}>Maior gasto</div><div style={{fontSize:14,fontWeight:500,color:"#EF4444"}}>{catData[0]?.cat||"-"}</div></div>
+            <div style={{...card,textAlign:"center",marginBottom:0}}><div style={{fontSize:12,color:"#999"}}>Ticket médio</div><div style={{fontSize:14,fontWeight:500,color:"#333"}}>R$ {filteredExpenses.length>0?Math.round(grandTotal/filteredExpenses.length).toLocaleString("pt-BR"):0}</div></div>
+          </div>}
+        </>}
+
+        {view==="list"&&state.expenses.length>0&&!importStep&&!showExpenseForm&&<>
           <div style={{display:"flex",gap:6,marginBottom:12,flexWrap:"wrap"}}>
             {["Todos",...CATEGORIES].map(cat=>{
               const count=cat==="Todos"?filteredExpenses.length:filteredExpenses.filter(e=>e.category===cat).length;
@@ -535,7 +647,6 @@ function QuitaApp() {
               return <button key={cat} onClick={()=>setCatFilter(cat)} style={{padding:"6px 12px",borderRadius:20,fontSize:12,border:catFilter===cat?"1.5px solid #7B2FF2":"1.5px solid #E5E5E5",background:catFilter===cat?"#EEEDFE":"#fff",color:catFilter===cat?"#7B2FF2":"#999",cursor:"pointer",fontWeight:500}}>{cat} ({count})</button>;
             })}
           </div>
-
           {CATEGORIES.map(cat=>{
             if(catFilter!=="Todos"&&catFilter!==cat)return null;
             const ce=filteredExpenses.filter(e=>e.category===cat);
