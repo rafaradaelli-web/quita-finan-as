@@ -215,88 +215,53 @@ function QuitaApp() {
     setExpName(""); setExpAmount(""); setShowExpenseForm(false);
   };
 
+
+  const sendToAI = async (content, isPdf) => {
+    setPdfParsing(true); setImportStep("pdf-loading");
+    try {
+      const prompt = 'Analise este extrato/fatura e extraia APENAS os GASTOS (valores negativos, débitos, pagamentos, compras, boletos, pix enviados).\n\nIGNORE: saldos diários, transferências recebidas, créditos, investimentos recebidos, equilíbrio entre contas, IOF, transferências enviadas para si mesmo.\n\nResponda APENAS com JSON válido, sem markdown, sem backticks, sem texto:\n{"expenses":[{"name":"descrição","amount":99.90,"category":"Categoria","date":"2026-01-15"}]}\n\nCategorias: Alimentação, Transporte, Moradia, Lazer, Saúde, Educação, Delivery, Assinaturas, Outros\n- amount SEMPRE positivo\n- date formato YYYY-MM-DD\n- Se não encontrar gastos: {"expenses":[]}';
+      const messages = isPdf
+        ? [{ role: "user", content: [{ type: "document", source: { type: "base64", media_type: "application/pdf", data: content } }, { type: "text", text: prompt }] }]
+        : [{ role: "user", content: prompt + "\n\nDados:\n" + content }];
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 4000, messages })
+      });
+      const data = await response.json();
+      if (data.error) { setToast("Erro: " + (data.error.message || "tente novamente")); setTimeout(() => setToast(null), 3000); setImportStep(null); setPdfParsing(false); return; }
+      const text = data.content?.map(c => c.text || "").join("") || "";
+      const clean = text.replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(clean);
+      if (parsed.expenses && parsed.expenses.length > 0) {
+        setPdfPreview(parsed.expenses.map((exp, i) => ({ ...exp, id: Date.now() + i, amount: Math.abs(parseFloat(exp.amount)) || 0, selected: true })));
+        setImportStep("pdf-preview");
+      } else { setToast("Nenhum gasto encontrado"); setTimeout(() => setToast(null), 2500); setImportStep(null); }
+    } catch (err) { console.error(err); setToast("Erro ao processar. Verifique conexão."); setTimeout(() => setToast(null), 3000); setImportStep(null); }
+    setPdfParsing(false);
+  };
+
   const handleExcelUpload = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
+    const file = e.target.files[0]; if (!file) return; e.target.value = "";
     const reader = new FileReader();
     reader.onload = (evt) => {
       try {
         const wb = XLSX.read(evt.target.result, { type: "array" });
         const ws = wb.Sheets[wb.SheetNames[0]];
-        const data = XLSX.utils.sheet_to_json(ws, { defval: "" });
-        if (data.length === 0) { setToast("Planilha vazia"); setTimeout(() => setToast(null), 2500); return; }
-        const cols = Object.keys(data[0]);
-        const guessName = cols.find(c => /descr|nome|item|gasto|detalh/i.test(c)) || cols[0];
-        const guessAmount = cols.find(c => /valor|amount|preco|preço|total|quantia/i.test(c)) || cols[1] || "";
-        const guessCat = cols.find(c => /categ|tipo|class/i.test(c)) || "";
-        const guessDate = cols.find(c => /data|date|dia|quando/i.test(c)) || "";
-        setExcelMapping({ name: guessName, amount: guessAmount, category: guessCat, date: guessDate });
-        setExcelPreview({ data, cols });
-        setImportStep("mapping");
+        const raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+        if (raw.length < 2) { setToast("Planilha vazia"); setTimeout(() => setToast(null), 2500); return; }
+        const textLines = raw.map(row => row.filter(c => String(c).trim()).join(" | ")).filter(l => l.trim().length > 3);
+        sendToAI(textLines.slice(0, 200).join("\n"), false);
       } catch (err) { setToast("Erro ao ler arquivo"); setTimeout(() => setToast(null), 2500); }
     };
     reader.readAsArrayBuffer(file);
-    e.target.value = "";
-  };
-
-  const parseExcelDate = (val) => {
-    if (!val) return Date.now();
-    if (typeof val === "number") { const d = new Date((val - 25569) * 86400000); return isNaN(d.getTime()) ? Date.now() : d.getTime(); }
-    const d = new Date(val);
-    return isNaN(d.getTime()) ? Date.now() : d.getTime();
-  };
-
-  const confirmImport = () => {
-    if (!excelPreview || !excelMapping.name || !excelMapping.amount) return;
-    const newExpenses = []; let imported = 0;
-    excelPreview.data.forEach((row, i) => {
-      const name = String(row[excelMapping.name] || "").trim();
-      const rawAmt = row[excelMapping.amount];
-      const amt = parseFloat(String(rawAmt).replace(/[^\d.,\-]/g, "").replace(",", "."));
-      if (!name || isNaN(amt) || amt <= 0) return;
-      let cat = "Outros";
-      if (excelMapping.category && row[excelMapping.category]) {
-        const rc = String(row[excelMapping.category]).trim();
-        const match = CATEGORIES.find(c => c.toLowerCase() === rc.toLowerCase());
-        cat = match || rc;
-      }
-      const date = excelMapping.date ? parseExcelDate(row[excelMapping.date]) : Date.now();
-      newExpenses.push({ id: Date.now() + i, name, amount: amt, category: cat, date });
-      imported++;
-    });
-    if (imported === 0) { setToast("Nenhum gasto válido"); setTimeout(() => setToast(null), 2500); return; }
-    setState(prev => { const n = { ...prev, expenses: [...prev.expenses, ...newExpenses] }; n.profileCompletion = calcProfile(n); save(n); return n; });
-    addXp(Math.min(imported * 5, 50), imported + " gastos importados!");
-    checkStreak();
-    setExcelPreview(null); setImportStep(null);
   };
 
   const handlePdfUpload = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    e.target.value = "";
-    setPdfParsing(true); setImportStep("pdf-loading");
+    const file = e.target.files[0]; if (!file) return; e.target.value = "";
     try {
       const base64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result.split(",")[1]); r.onerror = () => rej(); r.readAsDataURL(file); });
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514", max_tokens: 4000,
-          messages: [{ role: "user", content: [
-            { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
-            { type: "text", text: 'Analise este PDF (fatura de cartão, extrato bancário ou lista de gastos) e extraia TODOS os gastos/transações.\nResponda APENAS com JSON válido, sem markdown, sem backticks:\n{"expenses": [{"name": "descrição", "amount": 99.90, "category": "Categoria", "date": "2026-03-15"}]}\nCategorias: Alimentação, Transporte, Moradia, Lazer, Saúde, Educação, Delivery, Assinaturas, Outros\nIgnore pagamentos/créditos/estornos. Se não encontrar gastos: {"expenses": []}' }
-          ]}]
-        })
-      });
-      const data = await response.json();
-      const text = data.content?.map(c => c.text || "").join("") || "";
-      const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
-      if (parsed.expenses && parsed.expenses.length > 0) {
-        setPdfPreview(parsed.expenses.map((exp, i) => ({ ...exp, id: Date.now() + i, amount: Math.abs(parseFloat(exp.amount)) || 0, selected: true })));
-        setImportStep("pdf-preview");
-      } else { setToast("Nenhum gasto encontrado no PDF"); setTimeout(() => setToast(null), 2500); setImportStep(null); }
-    } catch (err) { setToast("Erro ao processar PDF"); setTimeout(() => setToast(null), 2500); setImportStep(null); }
-    setPdfParsing(false);
+      sendToAI(base64, true);
+    } catch (err) { setToast("Erro ao ler PDF"); setTimeout(() => setToast(null), 2500); }
   };
 
   const togglePdfItem = (idx) => { setPdfPreview(prev => prev.map((item, i) => i === idx ? { ...item, selected: !item.selected } : item)); };
@@ -308,7 +273,7 @@ function QuitaApp() {
     if (sel.length === 0) { setToast("Selecione pelo menos 1 gasto"); setTimeout(() => setToast(null), 2500); return; }
     const ne = sel.map((e, i) => ({ id: Date.now() + i, name: e.name, amount: e.amount, category: CATEGORIES.includes(e.category) ? e.category : "Outros", date: e.date ? new Date(e.date).getTime() || Date.now() : Date.now() }));
     setState(prev => { const n = { ...prev, expenses: [...prev.expenses, ...ne] }; n.profileCompletion = calcProfile(n); save(n); return n; });
-    addXp(Math.min(sel.length * 5, 50), sel.length + " gastos via PDF!");
+    addXp(Math.min(sel.length * 5, 50), sel.length + " gastos importados!");
     checkStreak();
     setPdfPreview(null); setImportStep(null);
   };
@@ -471,12 +436,6 @@ function QuitaApp() {
           </div>
           <div style={{background:"#F5F3FF",borderRadius:10,padding:12,marginBottom:14,display:"flex",justifyContent:"space-between"}}><span style={{fontSize:13,color:"#6B5FA0"}}>{pdfPreview.filter(e=>e.selected).length} selecionados</span><span style={{fontSize:13,fontWeight:500,color:"#7B2FF2"}}>R$ {pdfPreview.filter(e=>e.selected).reduce((s,e)=>s+e.amount,0).toLocaleString("pt-BR",{minimumFractionDigits:2})}</span></div>
           <div style={{display:"flex",gap:8}}><button style={{...btn,flex:1}} onClick={confirmPdfImport}>Importar ({pdfPreview.filter(e=>e.selected).length})</button><button style={{...btnOut,flex:1}} onClick={()=>{setPdfPreview(null);setImportStep(null);}}>Cancelar</button></div>
-        </div>}
-        {importStep==="mapping"&&excelPreview&&<div style={{...card,padding:20}}>
-          <div style={{fontSize:16,fontWeight:500,color:"#333",marginBottom:4}}>Mapear colunas</div>
-          <div style={{fontSize:13,color:"#999",marginBottom:16}}>{excelPreview.data.length} linhas. Diga qual coluna é o quê:</div>
-          {[["Descrição *","name"],["Valor (R$) *","amount"],["Categoria","category"],["Data","date"]].map(([label,key])=><div key={key} style={{marginBottom:10}}><label style={{fontSize:13,color:"#666",display:"block",marginBottom:4}}>{label}</label><select style={input} value={excelMapping[key]} onChange={e=>setExcelMapping(m=>({...m,[key]:e.target.value}))}><option value="">{key==="category"?"Nenhuma — usar Outros":key==="date"?"Nenhuma — usar hoje":"Selecione..."}</option>{excelPreview.cols.map(c=><option key={c} value={c}>{c}</option>)}</select></div>)}
-          <div style={{display:"flex",gap:8}}><button style={{...btn,flex:1,opacity:(!excelMapping.name||!excelMapping.amount)?0.5:1}} disabled={!excelMapping.name||!excelMapping.amount} onClick={confirmImport}>Importar {excelPreview.data.length}</button><button style={{...btnOut,flex:1}} onClick={()=>{setImportStep(null);setExcelPreview(null);}}>Cancelar</button></div>
         </div>}
         {showExpenseForm&&<div style={{...card,padding:20}}>
           <input style={{...input,marginBottom:10}} placeholder="O que gastou?" value={expName} onChange={e=>setExpName(e.target.value)}/>
