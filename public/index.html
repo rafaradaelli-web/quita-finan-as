@@ -72,7 +72,7 @@ const LESSONS = [
   },
 ];
 
-const CATEGORIES = ["Alimentação", "Transporte", "Moradia", "Lazer", "Saúde", "Educação", "Delivery", "Assinaturas", "Outros"];
+const CATEGORIES = ["Alimentação", "Transporte", "Moradia", "Lazer", "Saúde", "Educação", "Delivery", "Assinaturas", "Impostos", "Trabalho", "Cartão de Crédito", "Investimentos", "Transferências", "Outros"];
 
 const initState = () => {
   try { const s = localStorage.getItem("quita"); if (s) return JSON.parse(s); } catch(e) {}
@@ -137,6 +137,8 @@ function QuitaApp() {
   const [pdfParsing, setPdfParsing] = useState(false);
   const [pdfPreview, setPdfPreview] = useState(null);
   const [catFilter, setCatFilter] = useState("Todos");
+  const [monthFilter, setMonthFilter] = useState(() => { const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0"); });
+  const [detailFaturaId, setDetailFaturaId] = useState(null);
 
   const save = useCallback((s) => { try { localStorage.setItem("quita", JSON.stringify(s)); } catch(e) {} }, []);
 
@@ -237,11 +239,57 @@ function QuitaApp() {
     });
   };
 
+  const handleDetailFatura = async (faturaId, e) => {
+    const file = e.target.files[0]; if (!file) return; e.target.value = "";
+    setDetailFaturaId(faturaId);
+    setPdfParsing(true); setImportStep("pdf-loading");
+    try {
+      let content, isPdf = false;
+      if (file.name.match(/\.pdf$/i)) {
+        isPdf = true;
+        content = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result.split(",")[1]); r.onerror = () => rej(); r.readAsDataURL(file); });
+      } else {
+        const buf = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(); r.readAsArrayBuffer(file); });
+        const wb = XLSX.read(buf, { type: "array" });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+        content = raw.map(row => row.filter(c => String(c).trim()).join(" | ")).filter(l => l.trim().length > 3).slice(0, 200).join("\n");
+      }
+      const prompt2 = 'Esta é uma FATURA DE CARTÃO DE CRÉDITO. Extraia TODOS os gastos/compras individuais.\n\nResponda APENAS com JSON válido:\n{"expenses":[{"name":"descrição","amount":99.90,"category":"Categoria","date":"2026-01-15"}]}\n\nCategorias: Alimentação, Transporte, Moradia, Lazer, Saúde, Educação, Delivery, Assinaturas, Impostos, Trabalho, Outros\n- amount SEMPRE positivo\n- date formato YYYY-MM-DD\n- Ignore juros, multas, encargos, pagamentos anteriores\n- Se não encontrar: {"expenses":[]}';
+      const messages = isPdf
+        ? [{ role: "user", content: [{ type: "document", source: { type: "base64", media_type: "application/pdf", data: content } }, { type: "text", text: prompt2 }] }]
+        : [{ role: "user", content: prompt2 + "\n\nDados:\n" + content }];
+      const response = await fetch("/api/claude", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 4000, messages })
+      });
+      const data = await response.json();
+      if (data.error) { setToast("Erro: " + (data.error.message || "")); setTimeout(() => setToast(null), 3000); setImportStep(null); setPdfParsing(false); setDetailFaturaId(null); return; }
+      const text = data.content?.map(c => c.text || "").join("") || "";
+      const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+      if (parsed.expenses && parsed.expenses.length > 0) {
+        // Remove the original fatura expense and add detailed ones
+        setState(prev => {
+          const n = { ...prev, expenses: prev.expenses.filter(e => e.id !== faturaId) };
+          parsed.expenses.forEach((exp, i) => {
+            n.expenses.push({ id: Date.now() + i, name: exp.name, amount: Math.abs(parseFloat(exp.amount)) || 0, category: CATEGORIES.includes(exp.category) ? exp.category : "Outros", date: exp.date ? new Date(exp.date).getTime() || Date.now() : Date.now() });
+          });
+          n.profileCompletion = calcProfile(n);
+          save(n);
+          return n;
+        });
+        addXp(Math.min(parsed.expenses.length * 5, 100), parsed.expenses.length + " itens da fatura detalhados!");
+        setImportStep(null);
+      } else { setToast("Nenhum gasto na fatura"); setTimeout(() => setToast(null), 2500); setImportStep(null); }
+    } catch (err) { console.error(err); setToast("Erro ao processar fatura"); setTimeout(() => setToast(null), 2500); setImportStep(null); }
+    setPdfParsing(false); setDetailFaturaId(null);
+  };
+
 
   const sendToAI = async (content, isPdf) => {
     setPdfParsing(true); setImportStep("pdf-loading");
     try {
-      const prompt = 'Analise este extrato/fatura e extraia APENAS os GASTOS (valores negativos, débitos, pagamentos, compras, boletos, pix enviados).\n\nIGNORE: saldos diários, transferências recebidas, créditos, investimentos recebidos, equilíbrio entre contas, IOF, transferências enviadas para si mesmo (mesmo nome do titular).\n\nCategorize INTELIGENTEMENTE baseado na descrição:\n- Alimentação: supermercado, restaurante, padaria, açougue\n- Delivery: iFood, Rappi, Uber Eats, apps de entrega\n- Transporte: Uber, 99, combustível, estacionamento, pedágio\n- Moradia: aluguel, condomínio, energia (Copel/Enel/CPFL), água, gás\n- Assinaturas: Netflix, Spotify, streaming, software mensal\n- Saúde: farmácia, médico, plano de saúde, academia\n- Educação: escola, curso, livros, mensalidade\n- Lazer: cinema, viagem, entretenimento, roupas, compras pessoais\n- Outros: contabilidade, impostos (DAS/DARF), tarifas bancárias, transferências para terceiros, boletos não identificados\n\nResponda APENAS com JSON válido, sem markdown, sem backticks, sem texto:\n{"expenses":[{"name":"descrição limpa e curta","amount":99.90,"category":"Categoria","date":"2026-01-15"}]}\n\n- amount SEMPRE positivo (sem sinal negativo)\n- date no formato YYYY-MM-DD\n- name deve ser limpo e legível (ex: "Copel" não "Pagamento de boleto Copel")\n- Se não encontrar gastos: {"expenses":[]}';
+      const prompt = 'Analise este extrato/fatura e extraia APENAS os GASTOS (valores negativos, débitos, pagamentos, compras, boletos, pix enviados).\n\nIGNORE: saldos diários, transferências recebidas, créditos, investimentos recebidos, equilíbrio entre contas, IOF, transferências enviadas para si mesmo (mesmo nome do titular).\n\nIMPORTANTE sobre fatura de cartão: se aparecer "Pagamento de fatura do cartão", categorize como "Cartão de Crédito" e mantenha o valor. O usuário vai detalhar depois.\n\nCategorize INTELIGENTEMENTE:\n- Alimentação: supermercado, restaurante, padaria, açougue, mercado\n- Delivery: iFood, Rappi, Uber Eats, apps de entrega\n- Transporte: Uber, 99, combustível, estacionamento, pedágio\n- Moradia: aluguel, condomínio, energia (Copel/Enel/CPFL), água, gás, IPTU\n- Assinaturas: Netflix, Spotify, streaming, software mensal\n- Saúde: farmácia, médico, plano de saúde, academia\n- Educação: escola, curso, livros, mensalidade\n- Lazer: cinema, viagem, entretenimento, roupas, compras pessoais\n- Impostos: DAS, DARF, Simples Nacional, IPVA, IR, taxas governamentais, Fundo Reequipamento\n- Trabalho: contabilidade, ferramentas de trabalho, coworking, PJBank, serviços profissionais\n- Cartão de Crédito: pagamento de fatura do cartão\n- Transferências: Pix enviado para pessoas (não empresas)\n- Investimentos: aportes, aplicações\n- Outros: o que não se encaixar em nenhuma\n\nResponda APENAS com JSON válido, sem markdown, sem backticks, sem texto:\n{"expenses":[{"name":"descrição limpa e curta","amount":99.90,"category":"Categoria","date":"2026-01-15"}]}\n\n- amount SEMPRE positivo (sem sinal negativo)\n- date no formato YYYY-MM-DD\n- name deve ser limpo e legível (ex: "Copel" não "Pagamento de boleto Copel")\n- Se não encontrar gastos: {"expenses":[]}';
       const messages = isPdf
         ? [{ role: "user", content: [{ type: "document", source: { type: "base64", media_type: "application/pdf", data: content } }, { type: "text", text: prompt }] }]
         : [{ role: "user", content: prompt + "\n\nDados:\n" + content }];
@@ -326,7 +374,9 @@ function QuitaApp() {
     });
   };
 
-  const totalExpenses = state.expenses.filter(e => Date.now() - e.date < 30 * 86400000).reduce((s, e) => s + e.amount, 0);
+  const filterByMonth = (e) => { const d = new Date(e.date); return (d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0")) === monthFilter; };
+  const filteredExpenses = state.expenses.filter(filterByMonth);
+  const totalExpenses = filteredExpenses.reduce((s, e) => s + e.amount, 0);
   const levelInfo = LEVELS[state.level];
   const nextLevel = LEVELS[state.level + 1];
   const levelProgress = nextLevel ? ((state.xp - levelInfo.xp) / (nextLevel.xp - levelInfo.xp)) * 100 : 100;
@@ -433,9 +483,20 @@ function QuitaApp() {
     );
   };
 
-  const Expenses = () => (
+  const Expenses = () => {
+    const months = [...new Set(state.expenses.map(e => { const d=new Date(e.date); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0"); }))].sort().reverse();
+    if (months.length > 0 && !months.includes(monthFilter)) setMonthFilter(months[0]);
+    const monthLabel = (m) => { const [y,mo]=m.split("-"); const names=["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"]; return names[parseInt(mo)-1]+" "+y; };
+    return (
     <div style={{background:"#F8F8F8",minHeight:"100vh"}}>
-      <div style={{...ph,paddingBottom:24}}><div style={{fontSize:14,opacity:0.8}}>Gastos do mês</div><div style={{fontSize:28,fontWeight:500}}>R$ {totalExpenses.toLocaleString("pt-BR",{minimumFractionDigits:2})}</div>{state.income>0&&<div style={{fontSize:12,opacity:0.7,marginTop:4}}>{Math.round((totalExpenses/state.income)*100)}% da renda</div>}</div>
+      <div style={{...ph,paddingBottom:24}}>
+        <div style={{fontSize:14,opacity:0.8}}>Gastos do mês</div>
+        <div style={{fontSize:28,fontWeight:500}}>R$ {totalExpenses.toLocaleString("pt-BR",{minimumFractionDigits:2})}</div>
+        {state.income>0&&<div style={{fontSize:12,opacity:0.7,marginTop:4}}>{Math.round((totalExpenses/state.income)*100)}% da renda</div>}
+        {months.length>1&&<div style={{display:"flex",gap:6,marginTop:10,flexWrap:"wrap"}}>
+          {months.map(m=><button key={m} onClick={()=>setMonthFilter(m)} style={{padding:"4px 12px",borderRadius:14,fontSize:12,border:"none",background:monthFilter===m?"rgba(255,255,255,0.3)":"rgba(255,255,255,0.1)",color:"#fff",cursor:"pointer",fontWeight:monthFilter===m?500:400}}>{monthLabel(m)}</button>)}
+        </div>}
+      </div>
       <div style={{padding:16}}>
         <div style={{display:"flex",gap:8,marginBottom:10}}>
           <button style={{...btn,flex:1,fontSize:14,padding:"12px 8px"}} onClick={()=>setShowExpenseForm(true)}>+ Registrar</button>
@@ -469,7 +530,7 @@ function QuitaApp() {
         {state.expenses.length>0&&!importStep&&<>
           <div style={{display:"flex",gap:6,marginBottom:12,flexWrap:"wrap"}}>
             {["Todos",...CATEGORIES].map(cat=>{
-              const count=cat==="Todos"?state.expenses.filter(e=>Date.now()-e.date<30*86400000).length:state.expenses.filter(e=>e.category===cat&&Date.now()-e.date<30*86400000).length;
+              const count=cat==="Todos"?filteredExpenses.length:filteredExpenses.filter(e=>e.category===cat).length;
               if(cat!=="Todos"&&count===0)return null;
               return <button key={cat} onClick={()=>setCatFilter(cat)} style={{padding:"6px 12px",borderRadius:20,fontSize:12,border:catFilter===cat?"1.5px solid #7B2FF2":"1.5px solid #E5E5E5",background:catFilter===cat?"#EEEDFE":"#fff",color:catFilter===cat?"#7B2FF2":"#999",cursor:"pointer",fontWeight:500}}>{cat} ({count})</button>;
             })}
@@ -477,7 +538,7 @@ function QuitaApp() {
 
           {CATEGORIES.map(cat=>{
             if(catFilter!=="Todos"&&catFilter!==cat)return null;
-            const ce=state.expenses.filter(e=>e.category===cat&&Date.now()-e.date<30*86400000);
+            const ce=filteredExpenses.filter(e=>e.category===cat);
             if(ce.length===0)return null;
             const ct=ce.reduce((s,e)=>s+e.amount,0);
             return(<div key={cat} style={card}>
@@ -488,11 +549,15 @@ function QuitaApp() {
               {ce.sort((a,b)=>b.date-a.date).map(e=><div key={e.id} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 0",borderBottom:"1px solid #F5F5F5"}}>
                 <div style={{flex:1,minWidth:0}}>
                   <div style={{fontSize:14,color:"#333",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.name}</div>
-                  <div style={{display:"flex",alignItems:"center",gap:6,marginTop:4}}>
+                  <div style={{display:"flex",alignItems:"center",gap:6,marginTop:4,flexWrap:"wrap"}}>
                     <select value={e.category} onChange={ev=>{ev.stopPropagation();updateExpenseCategory(e.id,ev.target.value)}} style={{fontSize:11,color:"#7B2FF2",background:"#EEEDFE",border:"none",borderRadius:6,padding:"2px 8px",cursor:"pointer"}}>
                       {CATEGORIES.map(c=><option key={c}>{c}</option>)}
                     </select>
                     <span style={{fontSize:11,color:"#BBB"}}>{new Date(e.date).toLocaleDateString("pt-BR")}</span>
+                    {e.category==="Cartão de Crédito"&&<label style={{fontSize:11,color:"#fff",background:"#7B2FF2",borderRadius:6,padding:"2px 8px",cursor:"pointer",fontWeight:500}}>
+                      Detalhar fatura
+                      <input type="file" accept=".pdf,.xlsx,.xls,.csv" onChange={ev=>handleDetailFatura(e.id,ev)} style={{display:"none"}}/>
+                    </label>}
                   </div>
                 </div>
                 <span style={{fontSize:14,fontWeight:500,color:"#7B2FF2",whiteSpace:"nowrap"}}>R$ {e.amount.toLocaleString("pt-BR",{minimumFractionDigits:2})}</span>
@@ -507,7 +572,7 @@ function QuitaApp() {
       </div>
       <div style={{height:20}}/><NavBar/>
     </div>
-  );
+  );};
 
   const Goals = () => (
     <div style={{background:"#F8F8F8",minHeight:"100vh"}}>
