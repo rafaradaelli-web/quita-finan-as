@@ -136,6 +136,7 @@ function QuitaApp() {
   const [importStep, setImportStep] = useState(null);
   const [pdfParsing, setPdfParsing] = useState(false);
   const [pdfPreview, setPdfPreview] = useState(null);
+  const [catFilter, setCatFilter] = useState("Todos");
 
   const save = useCallback((s) => { try { localStorage.setItem("quita", JSON.stringify(s)); } catch(e) {} }, []);
 
@@ -215,11 +216,32 @@ function QuitaApp() {
     setExpName(""); setExpAmount(""); setShowExpenseForm(false);
   };
 
+  const updateExpenseCategory = (expId, newCat) => {
+    setState(prev => {
+      const exp = prev.expenses.find(e => e.id === expId);
+      if (!exp || exp.category === newCat) return prev;
+      const n = { ...prev, expenses: prev.expenses.map(e => e.id === expId ? { ...e, category: newCat } : e) };
+      n.profileCompletion = calcProfile(n);
+      save(n);
+      return n;
+    });
+    addXp(2, "Categoria atualizada");
+  };
+
+  const deleteExpense = (expId) => {
+    setState(prev => {
+      const n = { ...prev, expenses: prev.expenses.filter(e => e.id !== expId) };
+      n.profileCompletion = calcProfile(n);
+      save(n);
+      return n;
+    });
+  };
+
 
   const sendToAI = async (content, isPdf) => {
     setPdfParsing(true); setImportStep("pdf-loading");
     try {
-      const prompt = 'Analise este extrato/fatura e extraia APENAS os GASTOS (valores negativos, débitos, pagamentos, compras, boletos, pix enviados).\n\nIGNORE: saldos diários, transferências recebidas, créditos, investimentos recebidos, equilíbrio entre contas, IOF, transferências enviadas para si mesmo.\n\nResponda APENAS com JSON válido, sem markdown, sem backticks, sem texto:\n{"expenses":[{"name":"descrição","amount":99.90,"category":"Categoria","date":"2026-01-15"}]}\n\nCategorias: Alimentação, Transporte, Moradia, Lazer, Saúde, Educação, Delivery, Assinaturas, Outros\n- amount SEMPRE positivo\n- date formato YYYY-MM-DD\n- Se não encontrar gastos: {"expenses":[]}';
+      const prompt = 'Analise este extrato/fatura e extraia APENAS os GASTOS (valores negativos, débitos, pagamentos, compras, boletos, pix enviados).\n\nIGNORE: saldos diários, transferências recebidas, créditos, investimentos recebidos, equilíbrio entre contas, IOF, transferências enviadas para si mesmo (mesmo nome do titular).\n\nCategorize INTELIGENTEMENTE baseado na descrição:\n- Alimentação: supermercado, restaurante, padaria, açougue\n- Delivery: iFood, Rappi, Uber Eats, apps de entrega\n- Transporte: Uber, 99, combustível, estacionamento, pedágio\n- Moradia: aluguel, condomínio, energia (Copel/Enel/CPFL), água, gás\n- Assinaturas: Netflix, Spotify, streaming, software mensal\n- Saúde: farmácia, médico, plano de saúde, academia\n- Educação: escola, curso, livros, mensalidade\n- Lazer: cinema, viagem, entretenimento, roupas, compras pessoais\n- Outros: contabilidade, impostos (DAS/DARF), tarifas bancárias, transferências para terceiros, boletos não identificados\n\nResponda APENAS com JSON válido, sem markdown, sem backticks, sem texto:\n{"expenses":[{"name":"descrição limpa e curta","amount":99.90,"category":"Categoria","date":"2026-01-15"}]}\n\n- amount SEMPRE positivo (sem sinal negativo)\n- date no formato YYYY-MM-DD\n- name deve ser limpo e legível (ex: "Copel" não "Pagamento de boleto Copel")\n- Se não encontrar gastos: {"expenses":[]}';
       const messages = isPdf
         ? [{ role: "user", content: [{ type: "document", source: { type: "base64", media_type: "application/pdf", data: content } }, { type: "text", text: prompt }] }]
         : [{ role: "user", content: prompt + "\n\nDados:\n" + content }];
@@ -443,7 +465,44 @@ function QuitaApp() {
           <select style={{...input,marginBottom:12}} value={expCat} onChange={e=>setExpCat(e.target.value)}>{CATEGORIES.map(c=><option key={c}>{c}</option>)}</select>
           <div style={{display:"flex",gap:8}}><button style={{...btn,flex:1}} onClick={addExpense}>Salvar (+5 XP)</button><button style={{...btnOut,flex:1}} onClick={()=>setShowExpenseForm(false)}>Cancelar</button></div>
         </div>}
-        {CATEGORIES.map(cat=>{const ce=state.expenses.filter(e=>e.category===cat&&Date.now()-e.date<30*86400000);if(ce.length===0)return null;const ct=ce.reduce((s,e)=>s+e.amount,0);return(<div key={cat} style={card}><div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}><span style={{fontSize:15,fontWeight:500,color:"#333"}}>{cat}</span><span style={{fontSize:15,fontWeight:500,color:"#7B2FF2"}}>R$ {ct.toLocaleString("pt-BR",{minimumFractionDigits:2})}</span></div>{ce.slice(-3).reverse().map(e=><div key={e.id} style={{display:"flex",justifyContent:"space-between",fontSize:13,color:"#999",padding:"4px 0"}}><span>{e.name}</span><span>R$ {e.amount.toLocaleString("pt-BR",{minimumFractionDigits:2})}</span></div>)}</div>);})}
+
+        {state.expenses.length>0&&!importStep&&<>
+          <div style={{display:"flex",gap:6,marginBottom:12,flexWrap:"wrap"}}>
+            {["Todos",...CATEGORIES].map(cat=>{
+              const count=cat==="Todos"?state.expenses.filter(e=>Date.now()-e.date<30*86400000).length:state.expenses.filter(e=>e.category===cat&&Date.now()-e.date<30*86400000).length;
+              if(cat!=="Todos"&&count===0)return null;
+              return <button key={cat} onClick={()=>setCatFilter(cat)} style={{padding:"6px 12px",borderRadius:20,fontSize:12,border:catFilter===cat?"1.5px solid #7B2FF2":"1.5px solid #E5E5E5",background:catFilter===cat?"#EEEDFE":"#fff",color:catFilter===cat?"#7B2FF2":"#999",cursor:"pointer",fontWeight:500}}>{cat} ({count})</button>;
+            })}
+          </div>
+
+          {CATEGORIES.map(cat=>{
+            if(catFilter!=="Todos"&&catFilter!==cat)return null;
+            const ce=state.expenses.filter(e=>e.category===cat&&Date.now()-e.date<30*86400000);
+            if(ce.length===0)return null;
+            const ct=ce.reduce((s,e)=>s+e.amount,0);
+            return(<div key={cat} style={card}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
+                <span style={{fontSize:15,fontWeight:500,color:"#333"}}>{cat}</span>
+                <span style={{fontSize:15,fontWeight:500,color:"#7B2FF2"}}>R$ {ct.toLocaleString("pt-BR",{minimumFractionDigits:2})}</span>
+              </div>
+              {ce.sort((a,b)=>b.date-a.date).map(e=><div key={e.id} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 0",borderBottom:"1px solid #F5F5F5"}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:14,color:"#333",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.name}</div>
+                  <div style={{display:"flex",alignItems:"center",gap:6,marginTop:4}}>
+                    <select value={e.category} onChange={ev=>{ev.stopPropagation();updateExpenseCategory(e.id,ev.target.value)}} style={{fontSize:11,color:"#7B2FF2",background:"#EEEDFE",border:"none",borderRadius:6,padding:"2px 8px",cursor:"pointer"}}>
+                      {CATEGORIES.map(c=><option key={c}>{c}</option>)}
+                    </select>
+                    <span style={{fontSize:11,color:"#BBB"}}>{new Date(e.date).toLocaleDateString("pt-BR")}</span>
+                  </div>
+                </div>
+                <span style={{fontSize:14,fontWeight:500,color:"#7B2FF2",whiteSpace:"nowrap"}}>R$ {e.amount.toLocaleString("pt-BR",{minimumFractionDigits:2})}</span>
+                <button onClick={()=>deleteExpense(e.id)} style={{background:"none",border:"none",cursor:"pointer",padding:4,flexShrink:0}}>
+                  <svg width="16" height="16" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8" stroke="#CCC" strokeWidth="1.5" strokeLinecap="round"/></svg>
+                </button>
+              </div>)}
+            </div>);
+          })}
+        </>}
         {state.expenses.length===0&&!importStep&&<div style={{textAlign:"center",color:"#999",padding:40,fontSize:14}}>Nenhum gasto registrado. Registre ou importe!</div>}
       </div>
       <div style={{height:20}}/><NavBar/>
